@@ -294,18 +294,6 @@ const (
 	remoteHomeMarkerEnd   = "__CCHOME_END__"
 )
 
-func remoteHomeDir(host string) (string, error) {
-	out, err := remoteExecNoForward(host, remoteHomeProbeCmd())
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve remote home: %w", err)
-	}
-	home, err := parseRemoteHome(out)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve remote home: %w", err)
-	}
-	return home, nil
-}
-
 // remoteHomeProbeCmd prints $HOME wrapped in sentinel markers and nothing else.
 // printf emits no trailing newline, so the text between the markers is exactly
 // $HOME. The markers let parseRemoteHome discard any banner lines emitted by
@@ -411,24 +399,6 @@ func sshNoForwardArgs(host, cmd string) []string {
 // remoteExecNoForward runs an SSH command and returns only its stdout. stderr
 // is captured separately and surfaced solely in the error message, so banner
 // or warning text on stderr never pollutes the returned value (issue #80).
-func remoteExecNoForward(host, cmd string) (string, error) {
-	c := exec.Command("ssh", sshNoForwardArgs(host, cmd)...)
-	hideConsoleWindow(c)
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
-	err := c.Run()
-	out := strings.TrimSpace(stdout.String())
-	if err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = out
-		}
-		return out, fmt.Errorf("ssh failed: %s: %w", detail, err)
-	}
-	return out, nil
-}
-
 // sshUploadAllInOneCmd builds a single remote shell command that resolves the
 // upload directory, mkdir -p's it, streams the local file into place, verifies
 // it is non-empty, and prints the final absolute path. Doing all of that in one
@@ -511,41 +481,6 @@ func sshUploadAllInOne(host, remoteDir, localPath, filename string) (string, err
 	return remotePath, nil
 }
 
-func sshUploadNoForward(host, localPath, remotePath string) error {
-	// Stream the local file to the remote via `ssh host 'cat > <quoted>'`
-	// instead of scp. OpenSSH 9.0+ defaults `scp` to the SFTP subsystem,
-	// where the remote path is treated as an SFTP PATH rather than being
-	// expanded by a remote shell — shell-quoting `host:'remote path'` in
-	// that mode is interpreted literally and breaks uploads. Using ssh
-	// redirection keeps quoting semantics stable across versions and
-	// removes the leading-dash local-path hazard entirely (local path is
-	// no longer an argv positional to scp).
-	f, err := os.Open(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to stat local file %s: %w", localPath, err)
-	}
-	if info.Size() == 0 {
-		return fmt.Errorf("local file is empty: %s", localPath)
-	}
-
-	c := exec.Command("ssh", sshNoForwardArgs(host, sshUploadRemoteCmd(remotePath))...)
-	c.Stdin = f
-	hideConsoleWindow(c)
-	if out, err := c.CombinedOutput(); err != nil {
-		return fmt.Errorf("ssh upload failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	if err := verifyRemoteUploadSize(host, remotePath, info.Size()); err != nil {
-		return err
-	}
-	return nil
-}
-
 // sshUploadRemoteCmd returns the remote shell command used by
 // sshUploadNoForward. Extracted so tests can pin the exact quoting without
 // spawning a real ssh process.
@@ -556,21 +491,6 @@ func sshUploadNoForward(host, localPath, remotePath string) error {
 // must not be readable by other users on the remote host.
 func sshUploadRemoteCmd(remotePath string) string {
 	return "umask 077; cat > " + shQuote(remotePath)
-}
-
-func verifyRemoteUploadSize(host, remotePath string, wantBytes int64) error {
-	out, err := remoteExecNoForward(host, remoteUploadSizeCmd(remotePath))
-	if err != nil {
-		return fmt.Errorf("remote upload verification failed for %s: %w", remotePath, err)
-	}
-	gotBytes, err := parseRemoteUploadSize(out)
-	if err != nil {
-		return fmt.Errorf("remote upload verification returned invalid size for %s: %q: %w", remotePath, out, err)
-	}
-	if gotBytes != wantBytes {
-		return fmt.Errorf("remote upload size mismatch for %s: local=%d remote=%d", remotePath, wantBytes, gotBytes)
-	}
-	return nil
 }
 
 func remoteUploadSizeCmd(remotePath string) string {
