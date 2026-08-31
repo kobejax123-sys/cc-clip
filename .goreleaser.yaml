@@ -31,7 +31,7 @@ checksum:
 
 release:
   github:
-    owner: ShunmeiCho
+    owner: kobejax123-sys
     name: cc-clip
   draft: false
   prerelease: auto
