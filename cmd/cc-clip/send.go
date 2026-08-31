@@ -228,21 +228,10 @@ func uploadClipboardImage(host, remoteDir string) (*uploadResult, error) {
 		return nil, fmt.Errorf("clipboard image is empty")
 	}
 
-	remoteHome, err := remoteHomeDir(host)
-	if err != nil {
-		return nil, err
-	}
-
-	remoteAbsDir := resolveRemoteDir(remoteHome, remoteDir)
 	ext := imageExt(info.Format)
 	filename, err := randomFilename(ext)
 	if err != nil {
 		return nil, err
-	}
-	remotePath := path.Join(remoteAbsDir, filename)
-
-	if _, err := remoteExecNoForward(host, "mkdir -p "+shQuote(remoteAbsDir)); err != nil {
-		return nil, fmt.Errorf("failed to create remote dir %s: %w", remoteAbsDir, err)
 	}
 
 	localPath, err := writeTempImage(data, ext)
@@ -250,7 +239,8 @@ func uploadClipboardImage(host, remoteDir string) (*uploadResult, error) {
 		return nil, err
 	}
 
-	if err := sshUploadNoForward(host, localPath, remotePath); err != nil {
+	remotePath, err := sshUploadAllInOne(host, remoteDir, localPath, filename)
+	if err != nil {
 		os.Remove(localPath)
 		return nil, fmt.Errorf("failed to upload image to %s: %w", remotePath, err)
 	}
@@ -276,12 +266,6 @@ func uploadLocalFile(host, remoteDir, localFile string) (*uploadResult, error) {
 		return nil, fmt.Errorf("--file must point to a regular image file, got %s: %s", describeFileMode(info.Mode()), localFile)
 	}
 
-	remoteHome, err := remoteHomeDir(host)
-	if err != nil {
-		return nil, err
-	}
-
-	remoteAbsDir := resolveRemoteDir(remoteHome, remoteDir)
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(localFile)), ".")
 	if ext == "" {
 		ext = "png"
@@ -290,12 +274,9 @@ func uploadLocalFile(host, remoteDir, localFile string) (*uploadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	remotePath := path.Join(remoteAbsDir, filename)
 
-	if _, err := remoteExecNoForward(host, "mkdir -p "+shQuote(remoteAbsDir)); err != nil {
-		return nil, fmt.Errorf("failed to create remote dir %s: %w", remoteAbsDir, err)
-	}
-	if err := sshUploadNoForward(host, localFile, remotePath); err != nil {
+	remotePath, err := sshUploadAllInOne(host, remoteDir, localFile, filename)
+	if err != nil {
 		return nil, fmt.Errorf("failed to upload image to %s: %w", remotePath, err)
 	}
 
@@ -446,6 +427,88 @@ func remoteExecNoForward(host, cmd string) (string, error) {
 		return out, fmt.Errorf("ssh failed: %s: %w", detail, err)
 	}
 	return out, nil
+}
+
+// sshUploadAllInOneCmd builds a single remote shell command that resolves the
+// upload directory, mkdir -p's it, streams the local file into place, verifies
+// it is non-empty, and prints the final absolute path. Doing all of that in one
+// SSH round trip — rather than the previous four separate connections (home
+// probe, mkdir, stream, size verify) — is what keeps a paste fast. The path
+// resolution mirrors resolveRemoteDir but runs on the remote where $HOME is
+// known; `~` is pushed down as a leading tilde that the remote shell expands.
+func sshUploadAllInOneCmd(remoteDir, filename string) string {
+	fq := shQuote(filename)
+	return "umask 077\n" +
+		remoteDirAssignment(remoteDir) + "\n" +
+		"mkdir -p \"$d\" || exit 1\n" +
+		`cat > "$d/"` + fq + ` || exit 1` + "\n" +
+		`test -s "$d/"` + fq + ` || exit 1` + "\n" +
+		`printf '%s' "$d/"` + fq + "\n"
+}
+
+// remoteDirAssignment builds the shell line that sets d to an absolute path,
+// resolving the "~" and "~/" prefixes in Go instead of on the remote. Doing the
+// strip here (rather than `${r#~/}` on the server) avoids the tilde/backslash
+// edge cases that differ between bash and dash, keeping the generated script
+// valid under /bin/sh (see WrapRemoteShell).
+func remoteDirAssignment(remoteDir string) string {
+	r := remoteDir
+	switch {
+	case r == "~":
+		return `d="$HOME"`
+	case strings.HasPrefix(r, "~/"):
+		rest := strings.TrimPrefix(r, "~/")
+		if rest == "" {
+			return `d="$HOME"`
+		}
+		return `d="$HOME/` + shellDoubleQuote(rest) + `"`
+	case strings.HasPrefix(r, "/"):
+		return `d="` + shellDoubleQuote(r) + `"`
+	default:
+		return `d="$HOME/` + shellDoubleQuote(r) + `"`
+	}
+}
+
+// shellDoubleQuote escapes a string so it is safe inside the double quotes we
+// wrap remote path segments in ($HOME stays unquoted so it expands remotely).
+func shellDoubleQuote(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`").Replace(s)
+}
+
+// sshUploadAllInOne streams one local file to the remote inside a single SSH
+// connection and returns the resulting absolute remote path (its stdout).
+func sshUploadAllInOne(host, remoteDir, localPath, filename string) (string, error) {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("failed to stat local file %s: %w", localPath, err)
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("local file is empty: %s", localPath)
+	}
+
+	c := exec.Command("ssh", sshNoForwardArgs(host, sshUploadAllInOneCmd(remoteDir, filename))...)
+	c.Stdin = f
+	hideConsoleWindow(c)
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+	if err := c.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		return "", fmt.Errorf("ssh upload failed: %s: %w", detail, err)
+	}
+	remotePath := strings.TrimSpace(stdout.String())
+	if remotePath == "" {
+		return "", fmt.Errorf("remote upload path empty")
+	}
+	return remotePath, nil
 }
 
 func sshUploadNoForward(host, localPath, remotePath string) error {
