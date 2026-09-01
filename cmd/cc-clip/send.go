@@ -21,6 +21,12 @@ import (
 )
 
 const defaultRemoteUploadDir = "~/.cache/cc-clip/uploads"
+
+// remoteUploadMaxAgeMinutes is how long an uploaded clipboard image may stay in
+// the remote upload directory before it is pruned on the next upload. Clipboard
+// images often contain screenshots of tokens or private conversations, so they
+// must not accumulate on the remote indefinitely.
+const remoteUploadMaxAgeMinutes = 1440
 const sendUsage = "usage: cc-clip send [<host>] [<file>] [--file PATH] [--remote-dir DIR] [--paste] [--delay-ms N] [--no-restore]"
 
 type sendOptions struct {
@@ -411,9 +417,20 @@ func sshUploadAllInOneCmd(remoteDir, filename string) string {
 	return "umask 077\n" +
 		remoteDirAssignment(remoteDir) + "\n" +
 		"mkdir -p \"$d\" || exit 1\n" +
+		remoteUploadExpiryCmd() + "\n" +
 		`cat > "$d/"` + fq + ` || exit 1` + "\n" +
 		`test -s "$d/"` + fq + ` || exit 1` + "\n" +
 		`printf '%s' "$d/"` + fq + "\n"
+}
+
+// remoteUploadExpiryCmd deletes upload files older than remoteUploadMaxAgeMinutes.
+// Screenshots pasted to a remote agent can contain sensitive content; pruning
+// them on each upload keeps the directory bounded without a separate timer. It
+// runs BEFORE the new file is written so a just-uploaded image is never caught.
+// The `|| true` plus stderr suppression means a remote with an older find (or
+// none) degrades to "no pruning" rather than failing the upload.
+func remoteUploadExpiryCmd() string {
+	return "find \"$d\" -type f -mmin +" + strconv.Itoa(remoteUploadMaxAgeMinutes) + " -exec rm -f {} + 2>/dev/null || true"
 }
 
 // remoteDirAssignment builds the shell line that sets d to an absolute path,
