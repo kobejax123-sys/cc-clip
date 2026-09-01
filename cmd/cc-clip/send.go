@@ -58,6 +58,11 @@ func cmdSend() {
 		}
 	}
 	restoreClipboard := !cfg.noRestore
+	// One-shot command: tear the pooled connection (and its ssh child) down on
+	// exit. Keeping this caller outside build-tagged files also gives the
+	// pooled machinery a platform-independent owner, so Linux staticcheck
+	// never sees closePooledSSH as unused.
+	defer closePooledSSH()
 
 	result, err := uploadImage(host, cfg.remoteDir, cfg.localFile)
 	if err != nil {
