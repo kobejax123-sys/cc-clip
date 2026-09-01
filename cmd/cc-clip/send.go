@@ -214,6 +214,7 @@ func uploadImage(host, remoteDir, localFile string) (*uploadResult, error) {
 }
 
 func uploadClipboardImage(host, remoteDir string) (*uploadResult, error) {
+	clipStart := time.Now()
 	clip := daemon.NewClipboardReader()
 	info, err := clip.Type()
 	if err != nil {
@@ -233,6 +234,7 @@ func uploadClipboardImage(host, remoteDir string) (*uploadResult, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("clipboard image is empty")
 	}
+	pooledLog("clipboard read+decode: %d bytes in %v", len(data), time.Since(clipStart).Round(time.Millisecond))
 
 	ext := imageExt(info.Format)
 	filename, err := randomFilename(ext)
@@ -462,9 +464,11 @@ func shellDoubleQuote(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`").Replace(s)
 }
 
-// sshUploadAllInOne streams one local file to the remote inside a single SSH
-// connection and returns the resulting absolute remote path (its stdout).
-func sshUploadAllInOne(host, remoteDir, localPath, filename string) (string, error) {
+// sshUploadOneShot streams one local file to the remote inside a single SSH
+// connection and returns the resulting absolute remote path (its stdout). It is
+// the fallback for the pooled-connection path in ssh_pool.go, which reuses one
+// long-lived SSH process across pastes.
+func sshUploadOneShot(host, remoteDir, localPath, filename string) (string, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open local file %s: %w", localPath, err)

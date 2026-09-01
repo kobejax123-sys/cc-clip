@@ -204,6 +204,8 @@ func runHotkeyLoop(cfg hotkeyConfig) {
 		log.Fatalf("hotkey pid file write failed: %v", err)
 	}
 	defer os.Remove(hotkeyPIDPath())
+	// Tear down any pooled upload connection (and its ssh child) on exit.
+	defer closePooledSSH()
 
 	// Remove stale stop file only if it predates our startup. This avoids a
 	// TOCTOU race where --stop writes the sentinel between VBS respawn and
@@ -515,7 +517,9 @@ func initHotkeyLogger() error {
 		return err
 	}
 	log.SetOutput(f)
-	log.SetFlags(log.LstdFlags)
+	// Microsecond stamps: paste-latency diagnosis lives and dies on the
+	// pressed → uploaded gap, which second-granularity stamps cannot show.
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	return nil
 }
 
