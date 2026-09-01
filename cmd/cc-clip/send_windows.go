@@ -3,9 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"log"
 	"os"
-	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/win32"
@@ -20,13 +26,6 @@ func systemFocusProbe() focusResult {
 	return focusResult{Handle: h, Known: ok}
 }
 
-// hiddenExec creates an exec.Cmd that won't flash a console window.
-func hiddenExec(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
-	hideConsoleWindow(cmd)
-	return cmd
-}
-
 func defaultRemoteHost() (string, bool, error) {
 	cfg, ok, err := loadHotkeyConfig()
 	if err != nil {
@@ -38,7 +37,43 @@ func defaultRemoteHost() (string, bool, error) {
 	return cfg.Host, true, nil
 }
 
-func pasteRemotePath(remotePath, imagePath string, delay time.Duration, restoreClipboard bool) error {
+// clipboardRestoreMu serializes the background clipboard-image restore
+// against the next paste's clipboard writes: without it, a rapid second press
+// could have its just-written remote-path text clobbered by the previous
+// paste's image restore, and the terminal would paste the image bytes.
+var clipboardRestoreMu sync.Mutex
+
+const clipboardRestoreWait = 2500 * time.Millisecond
+
+// waitForPendingRestore waits (bounded) for any in-flight background restore
+// to finish. On timeout it proceeds anyway — the alternative, waiting
+// unbounded, lets one hung powershell.exe stall every future paste.
+func waitForPendingRestore() {
+	deadline := time.Now().Add(clipboardRestoreWait)
+	for {
+		if clipboardRestoreMu.TryLock() {
+			clipboardRestoreMu.Unlock()
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("clipboard restore still in flight after %v; proceeding anyway", clipboardRestoreWait)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// pasteRemotePath writes the remote path to the clipboard and injects it with
+// a synthesized Ctrl+Shift+V. It returns as soon as the keystroke has fired —
+// the image-clipboard restore (a fresh PowerShell process, ~1s measured) runs
+// in the background and deletes imagePath afterwards when tempFile is set.
+// Callers must therefore not delete imagePath themselves on the success path.
+func pasteRemotePath(remotePath, imagePath string, tempFile bool, delay time.Duration, restoreClipboard bool) error {
+	// A previous paste's background restore may still be running; it must
+	// finish (or be abandoned) before this paste's path text lands on the
+	// clipboard.
+	waitForPendingRestore()
+
 	// Pin the window this paste is aimed at BEFORE touching the clipboard.
 	// The keystroke below goes to whatever is focused when it fires. Without
 	// this guard a window switch during `delay` delivers the remote path into
@@ -73,68 +108,65 @@ func pasteRemotePath(remotePath, imagePath string, delay time.Duration, restoreC
 		return err
 	}
 
-	if restoreClipboard {
-		time.Sleep(150 * time.Millisecond)
-		if err := windowsSetClipboardImage(imagePath); err != nil {
-			return fmt.Errorf("paste succeeded but clipboard restore failed: %w", err)
+	if !restoreClipboard {
+		if tempFile {
+			os.Remove(imagePath)
 		}
+		return nil
 	}
+
+	go func() {
+		// Give the keystroke's paste a moment to land before the clipboard
+		// gets the image back. The restore goes through a fresh PowerShell
+		// process (~1s measured), which is exactly why it runs in the
+		// background — the caller reports success the moment the paste fires.
+		time.Sleep(150 * time.Millisecond)
+		clipboardRestoreMu.Lock()
+		defer clipboardRestoreMu.Unlock()
+		if err := windowsSetClipboardImage(imagePath); err != nil {
+			log.Printf("paste succeeded but background clipboard restore failed: %v", err)
+		}
+		if tempFile {
+			os.Remove(imagePath)
+		}
+	}()
 
 	return nil
 }
 
-// clipboardPersistenceSnippet is prepended to every clipboard-setting
-// PowerShell script. Set-Clipboard and WinForms Clipboard.SetText ultimately
-// give ownership to a window owned by the short-lived PowerShell process; when
-// that process exits, Windows destroys the window and the clipboard data goes
-// with it. SetDataObject with $true asks WinForms to leave the data on the
-// clipboard after the app exits, and OleFlushClipboard forces the OLE
-// rendering path to actually commit it. Using both is belt-and-braces because
-// the exact persistence behavior depends on the data format and Windows
-// version.
-const clipboardPersistenceSnippet = `$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-if (-not ('CcClipOle' -as [type])) {
-  Add-Type -TypeDefinition @"
-using System.Runtime.InteropServices;
-public static class CcClipOle {
-    [DllImport("ole32.dll")]
-    public static extern int OleFlushClipboard();
-}
-"@
-}
-`
-
+// windowsSetClipboardText installs the paste path natively. With
+// SetClipboardData the SYSTEM owns the payload, so it survives this process
+// by construction — the PowerShell SetDataObject($true)+OleFlushClipboard
+// dance existed only because a managed DataObject's lifetime is tied to its
+// process. Spawning powershell.exe cost ~370ms per paste, measured.
 func windowsSetClipboardText(text string) error {
-	script := clipboardPersistenceSnippet + `
-[System.Windows.Forms.Clipboard]::SetDataObject($env:CC_CLIP_TEXT, $true)
-$hr = [CcClipOle]::OleFlushClipboard()
-if ($hr -ne 0) { throw "OleFlushClipboard failed with HRESULT 0x$($hr.ToString('X8'))" }`
-	cmd := hiddenExec("powershell", "-STA", "-NoProfile", "-Command", script)
-	cmd.Env = append(os.Environ(), "CC_CLIP_TEXT="+text)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to set text clipboard: %s: %w", string(out), err)
+	if err := win32.SetClipboardText(text); err != nil {
+		return fmt.Errorf("failed to set text clipboard: %w", err)
 	}
 	return nil
 }
 
+// windowsSetClipboardImage puts the image back on the clipboard natively.
+// The temp file carries whatever the clipboard held — PNG most often, but
+// browsers copying images hand over JPEG via CF_HTML — so decoding sniffs
+// the real format instead of assuming PNG. A PNG payload additionally goes
+// to the registered "PNG" format; the DIB rendering covers consumers that
+// only read CF_DIB. Also ~1s of PowerShell process spawn per paste, now gone.
 func windowsSetClipboardImage(imagePath string) error {
-	script := clipboardPersistenceSnippet + `
-Add-Type -AssemblyName System.Drawing
-$img = [System.Drawing.Image]::FromFile($env:CC_CLIP_IMAGE_PATH)
-try {
-  $data = New-Object System.Windows.Forms.DataObject
-  $data.SetData([System.Windows.Forms.DataFormats]::Bitmap, $true, $img)
-  [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)
-  $hr = [CcClipOle]::OleFlushClipboard()
-  if ($hr -ne 0) { throw "OleFlushClipboard failed with HRESULT 0x$($hr.ToString('X8'))" }
-} finally {
-  $img.Dispose()
-}`
-	cmd := hiddenExec("powershell", "-STA", "-NoProfile", "-Command", script)
-	cmd.Env = append(os.Environ(), "CC_CLIP_IMAGE_PATH="+imagePath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to restore image clipboard: %s: %w", string(out), err)
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return fmt.Errorf("failed to read clipboard restore image: %w", err)
+	}
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("clipboard restore image is not decodable: %w", err)
+	}
+	var pngBytes []byte
+	if format == "png" {
+		pngBytes = data
+	}
+	if err := win32.SetClipboardImage(pngBytes, win32.EncodeDIB(img)); err != nil {
+		return fmt.Errorf("failed to restore image clipboard: %w", err)
 	}
 	return nil
 }

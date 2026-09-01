@@ -310,16 +310,19 @@ func handleHotkeyPress(cfg hotkeyConfig, binding hotkeyBinding) error {
 		}
 		return err
 	}
-	defer func() {
+	cleanupImage := func() {
 		if result.TempFile {
 			os.Remove(result.LocalImagePath)
 		}
-	}()
+	}
 
 	log.Printf("hotkey: uploaded %s", result.RemotePath)
 
+	// On success the background restore owns the temp file's lifetime, so
+	// cleanup happens only on the error path here.
 	delay := time.Duration(cfg.DelayMS) * time.Millisecond
-	if err := pasteRemotePath(result.RemotePath, result.LocalImagePath, delay, !cfg.NoRestore); err != nil {
+	if err := pasteRemotePath(result.RemotePath, result.LocalImagePath, result.TempFile, delay, !cfg.NoRestore); err != nil {
+		cleanupImage()
 		if tray != nil {
 			tray.showBalloon("cc-clip", "Paste failed: "+err.Error(), niifError)
 		}

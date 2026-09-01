@@ -68,7 +68,9 @@ func cmdSend() {
 	if err != nil {
 		log.Fatalf("send failed: %v", err)
 	}
-	if result.TempFile {
+	// When --paste runs, pasteRemotePath (or its background restore) owns the
+	// temp file's lifetime; deleting it here would race the restore.
+	if result.TempFile && !cfg.paste {
 		defer os.Remove(result.LocalImagePath)
 	}
 
@@ -78,7 +80,10 @@ func cmdSend() {
 		return
 	}
 
-	if err := pasteRemotePath(result.RemotePath, result.LocalImagePath, time.Duration(cfg.delayMS)*time.Millisecond, restoreClipboard); err != nil {
+	if err := pasteRemotePath(result.RemotePath, result.LocalImagePath, result.TempFile, time.Duration(cfg.delayMS)*time.Millisecond, restoreClipboard); err != nil {
+		if result.TempFile {
+			os.Remove(result.LocalImagePath)
+		}
 		log.Fatalf("send uploaded the image but failed to inject the remote path: %v", err)
 	}
 }
