@@ -3,11 +3,8 @@
 package daemon
 
 import (
-	"encoding/base64"
 	"fmt"
-	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -34,13 +31,6 @@ var (
 	procGlobalSize                 = kernelDLL.NewProc("GlobalSize")
 	procRtlMoveMemory              = kernelDLL.NewProc("RtlMoveMemory")
 )
-
-// htmlDataImagePattern matches the first image embedded as a base64 data: URI
-// inside CF_HTML clipboard content (for example
-// `<img src="data:image/png;base64,...">`). Apps that "copy an image"
-// (browsers, rich-text editors) often publish only HTML and never a DIB, so
-// this branch is what lets such copies be treated as an image.
-var htmlDataImagePattern = regexp.MustCompile(`(?i)src\s*=\s*["']data:image/(png|jpe?g|gif|webp|bmp);base64,([A-Za-z0-9+/=]+)["']`)
 
 type windowsClipboard struct {
 	mu    sync.Mutex
@@ -292,27 +282,16 @@ func htmlFormat() uint32 {
 	return uint32(r1)
 }
 
-// embeddedImageFromHTML extracts the first image embedded as a base64 data: URI
-// from the CF_HTML clipboard content, if any. It reads the clipboard itself so
-// both Type() (probe) and ImageBytes() (fetch) can share one code path.
+// embeddedImageFromHTML reads the "HTML Format" clipboard payload and extracts
+// the first image embedded as a base64 data: URI. It reads the clipboard itself
+// so both Type() (probe) and ImageBytes() (fetch) can share one code path;
+// parseHTMLDataImage does the pure decode so it can be tested independently.
 func embeddedImageFromHTML() (format string, data []byte, ok bool) {
 	html, ok, err := readClipboardGlobalBytes(htmlFormat(), int64(maxImageSize()), fmt.Sprintf("clipboard HTML image exceeds %dMB limit", maxImageMB()))
 	if err != nil || !ok {
 		return "", nil, false
 	}
-	m := htmlDataImagePattern.FindSubmatch(html)
-	if m == nil {
-		return "", nil, false
-	}
-	sub := strings.ToLower(string(m[1]))
-	decoded, err := base64.StdEncoding.DecodeString(string(m[2]))
-	if err != nil || len(decoded) == 0 {
-		return "", nil, false
-	}
-	if sub == "jpeg" {
-		sub = "jpg"
-	}
-	return sub, decoded, true
+	return parseHTMLDataImage(html)
 }
 
 func readClipboardGlobalBytes(format uint32, maxBytes int64, tooLargeMsg string) ([]byte, bool, error) {
