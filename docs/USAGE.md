@@ -24,12 +24,12 @@
 
 ### 方式一：直接下载 exe（推荐，免编译）
 
-最新版 **v0.14.6** 的 Release 已附带可直接运行的 `cc-clip.exe`：
+最新版 **v0.14.7** 的 Release 已附带可直接运行的 `cc-clip.exe`：
 
-1. 打开 `github.com/kobejax123-sys/cc-clip/releases/tag/v0.14.6`
+1. 打开 `github.com/kobejax123-sys/cc-clip/releases/tag/v0.14.7`
 2. 在 Assets 区下载 `cc-clip.exe`
 3. 放到 PATH 目录下（Windows 示例：`C:\Users\<你的用户名>\.local\bin\cc-clip.exe`；macOS/Linux：`~/.local/bin/cc-clip`）
-4. 验证：`cc-clip version` 应输出 `cc-clip v0.14.6`
+4. 验证：`cc-clip version` 应输出 `cc-clip v0.14.7`
 
 > `~/.local/bin` 需已加入 PATH；若没有，把 `export PATH="$HOME/.local/bin:$PATH"` 追加到 shell 配置（`~/.bashrc` / `~/.profile`）。
 
@@ -43,7 +43,7 @@ go build -o ~/.local/bin/cc-clip.exe ./cmd/cc-clip
 cc-clip version   # 验证安装
 ```
 
-> 直接 `go build` 版本号显示 `dev`；要带版本号：`go build -ldflags "-X main.version=v0.14.6"`。网络受限环境（模块拉不下来）可加 `export GOPROXY=https://goproxy.cn,direct`。官方 `scripts/install.ps1` 硬编码上游仓库，装不了 fork，请用本页两种方式之一。
+> 直接 `go build` 版本号显示 `dev`；要带版本号：`go build -ldflags "-X main.version=v0.14.7"`。网络受限环境（模块拉不下来）可加 `export GOPROXY=https://goproxy.cn,direct`。官方 `scripts/install.ps1` 硬编码上游仓库，装不了 fork，请用本页两种方式之一。
 
 装好后启动热键：
 
@@ -100,7 +100,7 @@ cc-clip send <HOST> C:\path\to\img.png --paste
 ### 状态与体检
 
 ```bat
-cc-clip version              :: 版本号（当前最新 = v0.14.6）
+cc-clip version              :: 版本号（当前最新 = v0.14.7）
 cc-clip status               :: 各组件状态（daemon/token/服务）
 cc-clip doctor               :: 本地健康检查
 cc-clip doctor --host <HOST>  :: 端到端体检（经 SSH 检查远端）
@@ -173,3 +173,4 @@ cc-clip update --check        :: 检查是否有新版本
 | v0.14.3 | 修复 JPEG 复制恢复失败（弃用硬编码 png.Decode） |
 | v0.14.5 | 以上三版 squash 合并发布 |
 | v0.14.6 | 修复开机自启被陈旧 stop 哨兵吞掉：自启 VBS 只在自身已轮询时响应 stop |
+| v0.14.7 | 修复开机自启真正失效：VBS 重定向曾锁住 hotkey.log 致 exe 无法打开日志而退出（改独立 launch log） |
