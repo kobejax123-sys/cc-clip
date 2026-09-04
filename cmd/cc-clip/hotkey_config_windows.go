@@ -166,21 +166,7 @@ func installHotkeyAutostart() error {
 		return fmt.Errorf("cannot create hotkey log directory: %w", err)
 	}
 	stopFile := hotkeyStopFilePath()
-	content := fmt.Sprintf(`Set WshShell = CreateObject("WScript.Shell")
-Set fso = CreateObject("Scripting.FileSystemObject")
-Do
-  If fso.FileExists("%s") Then
-    fso.DeleteFile "%s", True
-    Exit Do
-  End If
-  WshShell.Run "cmd.exe /c """"%s"" hotkey --run-loop >> ""%s"" 2>&1""", 0, True
-  If fso.FileExists("%s") Then
-    fso.DeleteFile "%s", True
-    Exit Do
-  End If
-  WScript.Sleep 5000
-Loop
-`, stopFile, stopFile, exe, logFile, stopFile, stopFile)
+	content := hotkeyAutostartScript(exe, logFile, stopFile)
 	if err := os.WriteFile(vbsPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("cannot write hotkey launcher: %w", err)
 	}
@@ -191,6 +177,42 @@ Loop
 		return err
 	}
 	return nil
+}
+
+// hotkeyAutostartScript renders the VBS launcher that re-spawns the hotkey
+// process every time it exits. The stop sentinel tells a *live* launcher to
+// stop re-spawning: --stop writes it and kills the process, and the launcher
+// deletes it and exits on its next poll. A sentinel can only mean that when
+// this launcher was already polling. One found on the launcher's very first
+// iteration is necessarily stale — a --stop ran while no launcher was alive
+// (e.g. autostart disabled, or before a reboot) — so it is deleted and startup
+// proceeds. Without this guard, a single --stop would leave a sentinel that
+// silently swallowed the next login's autostart.
+func hotkeyAutostartScript(exe, logFile, stopFile string) string {
+	return fmt.Sprintf(`Set WshShell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+stopFile = "%s"
+firstRun = True
+Do
+  If fso.FileExists(stopFile) Then
+    If firstRun Then
+      ' stale sentinel from a --stop while no launcher was alive: clear and start
+      fso.DeleteFile stopFile, True
+    Else
+      ' live --stop arrived while this launcher was polling: honor it
+      fso.DeleteFile stopFile, True
+      Exit Do
+    End If
+  End If
+  firstRun = False
+  WshShell.Run "cmd.exe /c """"%s"" hotkey --run-loop >> ""%s"" 2>&1""", 0, True
+  If fso.FileExists(stopFile) Then
+    fso.DeleteFile stopFile, True
+    Exit Do
+  End If
+  WScript.Sleep 5000
+Loop
+`, stopFile, exe, logFile)
 }
 
 func uninstallHotkeyAutostart() error {

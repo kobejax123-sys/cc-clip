@@ -183,6 +183,49 @@ func TestInstallHotkeyAutostartWritesLauncherAndRegistryEntry(t *testing.T) {
 	}
 }
 
+// TestHotkeyAutostartScriptStaleStopFirstRun pins the fix for a one-shot
+// autostart failure: --stop leaves a sentinel that a live launcher consumes on
+// its next poll, but if no launcher was alive at the time (autostart disabled,
+// or a manual foreground start), the sentinel survives to the next login. The
+// launcher's first iteration must then treat the sentinel as stale — delete it
+// and start the process — not honor it as a stop and exit without starting.
+// A sentinel can only be a genuine stop once this launcher is already polling.
+func TestHotkeyAutostartScriptStaleStopFirstRun(t *testing.T) {
+	script := hotkeyAutostartScript(
+		`C:\tools\cc-clip.exe`,
+		`C:\cache\cc-clip\hotkey.log`,
+		`C:\cache\cc-clip\hotkey.stop`,
+	)
+
+	for _, want := range []string{
+		"firstRun = True",
+		"hotkey --run-loop",
+		`C:\tools\cc-clip.exe`,
+		`C:\cache\cc-clip\hotkey.log`,
+		`C:\cache\cc-clip\hotkey.stop`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("launcher missing %q:\n%s", want, script)
+		}
+	}
+
+	// Split the first-run branch from the polling branch inside the pre-run
+	// sentinel check.
+	body := script[strings.Index(script, "If firstRun Then")+len("If firstRun Then"):]
+	elseIdx := strings.Index(body, "Else")
+	if elseIdx < 0 {
+		t.Fatalf("first-run branch has no Else:\n%s", script)
+	}
+	firstRunBranch := body[:elseIdx]
+	if strings.Contains(firstRunBranch, "Exit Do") {
+		t.Fatalf("first-run (stale sentinel) branch must delete and start, not exit:\n%s", firstRunBranch)
+	}
+	pollBranch := body[elseIdx:]
+	if !strings.Contains(pollBranch, "Exit Do") {
+		t.Fatalf("polling (live stop) branch must exit the launcher:\n%s", pollBranch)
+	}
+}
+
 func TestUninstallHotkeyAutostartRemovesLauncher(t *testing.T) {
 	tmpDir := t.TempDir()
 	vbsPath := filepath.Join(tmpDir, "start-hotkey.vbs")
