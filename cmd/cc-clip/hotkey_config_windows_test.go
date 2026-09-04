@@ -143,12 +143,13 @@ func TestInstallHotkeyAutostartWritesLauncherAndRegistryEntry(t *testing.T) {
 	hotkeyEvalSymlinks = func(path string) (string, error) {
 		return path, nil
 	}
-	oldHotkeyLogPath := hotkeyLogPathFunc
-	hotkeyLogPathFunc = func() string {
-		return logPath
+	launchLogPath := filepath.Join(tmpDir, "hotkey-launch.log")
+	oldLaunchLogPath := hotkeyLaunchLogPathFunc
+	hotkeyLaunchLogPathFunc = func() string {
+		return launchLogPath
 	}
 	t.Cleanup(func() {
-		hotkeyLogPathFunc = oldHotkeyLogPath
+		hotkeyLaunchLogPathFunc = oldLaunchLogPath
 	})
 
 	var regValue string
@@ -175,8 +176,15 @@ func TestInstallHotkeyAutostartWritesLauncherAndRegistryEntry(t *testing.T) {
 	if !strings.Contains(text, `hotkey --run-loop`) {
 		t.Fatalf("launcher missing hotkey command: %s", text)
 	}
-	if !strings.Contains(text, logPath) {
-		t.Fatalf("launcher missing log path %q: %s", logPath, text)
+	if !strings.Contains(text, launchLogPath) {
+		t.Fatalf("launcher missing launch-log redirect %q: %s", launchLogPath, text)
+	}
+	// Regression for the autostart file-lock bug: the launcher redirect must NOT
+	// target the hotkey's own log. cmd.exe holds the redirect target open
+	// without FILE_SHARE_WRITE, so the child's open of that same file fails and
+	// autostart never survives login.
+	if strings.Contains(text, logPath) {
+		t.Fatalf("launcher must not redirect into the hotkey's own log %q:\n%s", logPath, text)
 	}
 	if !strings.Contains(regValue, `wscript.exe "`) {
 		t.Fatalf("registry value = %q, want wscript launcher", regValue)
@@ -193,7 +201,7 @@ func TestInstallHotkeyAutostartWritesLauncherAndRegistryEntry(t *testing.T) {
 func TestHotkeyAutostartScriptStaleStopFirstRun(t *testing.T) {
 	script := hotkeyAutostartScript(
 		`C:\tools\cc-clip.exe`,
-		`C:\cache\cc-clip\hotkey.log`,
+		`C:\cache\cc-clip\hotkey-launch.log`,
 		`C:\cache\cc-clip\hotkey.stop`,
 	)
 
@@ -201,7 +209,7 @@ func TestHotkeyAutostartScriptStaleStopFirstRun(t *testing.T) {
 		"firstRun = True",
 		"hotkey --run-loop",
 		`C:\tools\cc-clip.exe`,
-		`C:\cache\cc-clip\hotkey.log`,
+		`C:\cache\cc-clip\hotkey-launch.log`,
 		`C:\cache\cc-clip\hotkey.stop`,
 	} {
 		if !strings.Contains(script, want) {

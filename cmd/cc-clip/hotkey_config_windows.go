@@ -146,6 +146,22 @@ func hotkeyAutostartEnabled() bool {
 	return err == nil
 }
 
+// hotkeyLaunchLogPath is where the VBS launcher redirects the hotkey's stdout
+// and stderr. It must be a different file from the one the hotkey process opens
+// for its own logger (hotkeyLogPath): cmd.exe holds the redirect target open
+// without FILE_SHARE_WRITE, so the child's own log-open then fails with a
+// sharing violation and autostart spins forever — every 5s the launcher retries
+// and the child exits with "logger setup failed". A dedicated launch log keeps
+// startup errors captured without locking the hotkey's real log.
+var hotkeyLaunchLogPathFunc = func() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(cacheDir, "cc-clip", "hotkey-launch.log")
+}
+
 func installHotkeyAutostart() error {
 	exe, err := hotkeyExecutablePath()
 	if err != nil {
@@ -161,12 +177,12 @@ func installHotkeyAutostart() error {
 		return fmt.Errorf("cannot create hotkey launcher directory: %w", err)
 	}
 
-	logFile := hotkeyLogPath()
-	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
-		return fmt.Errorf("cannot create hotkey log directory: %w", err)
+	launchLog := hotkeyLaunchLogPathFunc()
+	if err := os.MkdirAll(filepath.Dir(launchLog), 0755); err != nil {
+		return fmt.Errorf("cannot create hotkey launcher log directory: %w", err)
 	}
 	stopFile := hotkeyStopFilePath()
-	content := hotkeyAutostartScript(exe, logFile, stopFile)
+	content := hotkeyAutostartScript(exe, launchLog, stopFile)
 	if err := os.WriteFile(vbsPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("cannot write hotkey launcher: %w", err)
 	}
@@ -188,7 +204,12 @@ func installHotkeyAutostart() error {
 // (e.g. autostart disabled, or before a reboot) — so it is deleted and startup
 // proceeds. Without this guard, a single --stop would leave a sentinel that
 // silently swallowed the next login's autostart.
-func hotkeyAutostartScript(exe, logFile, stopFile string) string {
+//
+// launchLog is where the launcher redirects the child's stdout/stderr. It must
+// NOT be the file the child itself logs to (hotkeyLogPath): cmd.exe opens the
+// redirect target without FILE_SHARE_WRITE, so the child's own open of that
+// same file fails and autostart never survives login.
+func hotkeyAutostartScript(exe, launchLog, stopFile string) string {
 	return fmt.Sprintf(`Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 stopFile = "%s"
@@ -212,7 +233,7 @@ Do
   End If
   WScript.Sleep 5000
 Loop
-`, stopFile, exe, logFile)
+`, stopFile, exe, launchLog)
 }
 
 func uninstallHotkeyAutostart() error {
